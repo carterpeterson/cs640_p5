@@ -56,7 +56,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
     private IDeviceService deviceProv;
     
     // Switch table in which rules should be installed
-    private byte table;
+    public static byte table;
     
     // Map of hosts to devices
     private Map<IDevice,Host> knownHosts;
@@ -70,14 +70,12 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 	{
 		log.info(String.format("Initializing %s...", MODULE_NAME));
 		Map<String,String> config = context.getConfigParams(this);
-        this.table = Byte.parseByte(config.get("table"));
-        
+		table = Byte.parseByte(config.get("table"));
 		this.floodlightProv = context.getServiceImpl(
-				IFloodlightProviderService.class);
-        this.linkDiscProv = context.getServiceImpl(ILinkDiscoveryService.class);
-        this.deviceProv = context.getServiceImpl(IDeviceService.class);
-        
-        this.knownHosts = new ConcurrentHashMap<IDevice,Host>();
+							     IFloodlightProviderService.class);
+		this.linkDiscProv = context.getServiceImpl(ILinkDiscoveryService.class);
+		this.deviceProv = context.getServiceImpl(IDeviceService.class);
+		this.knownHosts = new ConcurrentHashMap<IDevice,Host>();
 	}
 
 	/**

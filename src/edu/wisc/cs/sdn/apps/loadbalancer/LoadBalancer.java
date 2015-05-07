@@ -9,11 +9,23 @@ import java.util.Map;
 import org.openflow.protocol.OFMessage;
 import org.openflow.protocol.OFPacketIn;
 import org.openflow.protocol.OFType;
+import org.openflow.protocol.OFPort;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import edu.wisc.cs.sdn.apps.util.ArpServer;
+import edu.wisc.cs.sdn.apps.l3routing.L3Routing;
+
+import edu.wisc.cs.sdn.apps.util.Host;
+import edu.wisc.cs.sdn.apps.util.SwitchCommands;
+
+import org.openflow.protocol.action.OFAction;
+import org.openflow.protocol.action.OFActionOutput;
+import org.openflow.protocol.OFMatch;
+import org.openflow.protocol.instruction.OFInstructionApplyActions;
+import org.openflow.protocol.instruction.OFInstruction;
+import org.openflow.protocol.instruction.OFInstructionGotoTable;
 
 import net.floodlightcontroller.core.FloodlightContext;
 import net.floodlightcontroller.core.IFloodlightProviderService;
@@ -113,6 +125,44 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		/*********************************************************************/
 	}
 	
+    private void installVirtualIPRules(IOFSwitch curSwitch) {
+
+	Collection<LoadBalancerInstance> loadBalancers = instances.values();
+
+	for (LoadBalancerInstance loadBalancer : loadBalancers) {
+	    OFMatch matchRule = new OFMatch();
+	    matchRule.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+	    matchRule.setNetworkDestination(loadBalancer.getVirtualIP());
+	    matchRule.setNetworkProtocol(OFMatch.IP_PROTO_TCP);
+
+	    OFAction outputAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
+	    OFInstruction actions = 
+		new OFInstructionApplyActions(Arrays.asList(outputAction));
+	    SwitchCommands.installRule(curSwitch, this.table, 
+				       SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));
+	}
+    }
+
+    private void installARPRules(IOFSwitch curSwitch) {
+	OFMatch matchRule = new OFMatch();
+	matchRule.setDataLayerType(OFMatch.ETH_TYPE_ARP);
+
+	OFAction outputAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
+	OFInstruction actions = 
+	    new OFInstructionApplyActions(Arrays.asList(outputAction));
+	SwitchCommands.installRule(curSwitch, this.table, 
+				   SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));
+    }
+
+    private void installTableForwardRules(IOFSwitch curSwitch) {
+	OFMatch matchRule = new OFMatch();
+
+	OFInstruction actions = 
+	    new OFInstructionGotoTable(L3Routing.table);
+	SwitchCommands.installRule(curSwitch, this.table, 
+				   SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));	
+    }
+
 	/**
      * Event handler called when a switch joins the network.
      * @param DPID for the switch
@@ -131,6 +181,9 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		/*       (3) all other packets to the next rule table in the switch  */
 		
 		/*********************************************************************/
+		this.installVirtualIPRules(sw);
+		this.installARPRules(sw);
+		this.installTableFowardRules(sw);
 	}
 	
 	/**
