@@ -1,15 +1,18 @@
 package edu.wisc.cs.sdn.apps.loadbalancer;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.nio.ByteBuffer;
 
 import org.openflow.protocol.OFMessage;
 import org.openflow.protocol.OFPacketIn;
 import org.openflow.protocol.OFType;
 import org.openflow.protocol.OFPort;
+import org.openflow.protocol.OFOXMFieldType;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,6 +25,7 @@ import edu.wisc.cs.sdn.apps.util.SwitchCommands;
 
 import org.openflow.protocol.action.OFAction;
 import org.openflow.protocol.action.OFActionOutput;
+import org.openflow.protocol.action.OFActionSetField;
 import org.openflow.protocol.OFMatch;
 import org.openflow.protocol.instruction.OFInstructionApplyActions;
 import org.openflow.protocol.instruction.OFInstruction;
@@ -42,6 +46,9 @@ import net.floodlightcontroller.devicemanager.IDevice;
 import net.floodlightcontroller.devicemanager.IDeviceService;
 import net.floodlightcontroller.devicemanager.internal.DeviceManagerImpl;
 import net.floodlightcontroller.packet.Ethernet;
+import net.floodlightcontroller.packet.TCP;
+import net.floodlightcontroller.packet.IPv4;
+import net.floodlightcontroller.packet.ARP;
 import net.floodlightcontroller.util.MACAddress;
 
 public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
@@ -67,6 +74,10 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
     
     // Set of virtual IPs and the load balancer instances they correspond with
     private Map<Integer,LoadBalancerInstance> instances;
+
+    public static final short PRIORITY_GENERAL_RULE = 2;
+    public static final short PRIORITY_TABLE_FORWARD = 1;
+    public static final short PRIORITY_CONNECTION_SPECIFIC = 3;
 
     /**
      * Loads dependencies and initializes data structures.
@@ -139,19 +150,24 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 	    OFInstruction actions = 
 		new OFInstructionApplyActions(Arrays.asList(outputAction));
 	    SwitchCommands.installRule(curSwitch, this.table, 
-				       SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));
+				       PRIORITY_GENERAL_RULE, matchRule, Arrays.asList(actions));
 	}
     }
 
     private void installARPRules(IOFSwitch curSwitch) {
-	OFMatch matchRule = new OFMatch();
-	matchRule.setDataLayerType(OFMatch.ETH_TYPE_ARP);
+	Collection<LoadBalancerInstance> loadBalancers = instances.values();
 
-	OFAction outputAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
-	OFInstruction actions = 
-	    new OFInstructionApplyActions(Arrays.asList(outputAction));
-	SwitchCommands.installRule(curSwitch, this.table, 
-				   SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));
+	for (LoadBalancerInstance loadBalancer : loadBalancers) {
+	    OFMatch matchRule = new OFMatch();
+	    matchRule.setDataLayerType(OFMatch.ETH_TYPE_ARP);
+	    matchRule.setNetworkDestination(loadBalancer.getVirtualIP());
+
+	    OFAction outputAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
+	    OFInstruction actions = 
+		new OFInstructionApplyActions(Arrays.asList(outputAction));
+	    SwitchCommands.installRule(curSwitch, this.table, 
+				       PRIORITY_GENERAL_RULE, matchRule, Arrays.asList(actions));
+	}
     }
 
     private void installTableForwardRules(IOFSwitch curSwitch) {
@@ -160,7 +176,7 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 	OFInstruction actions = 
 	    new OFInstructionGotoTable(L3Routing.table);
 	SwitchCommands.installRule(curSwitch, this.table, 
-				   SwitchCommands.DEFAULT_PRIORITY, matchRule, Arrays.asList(actions));	
+				    PRIORITY_TABLE_FORWARD, matchRule, Arrays.asList(actions));	
     }
 
 	/**
@@ -183,7 +199,7 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		/*********************************************************************/
 		this.installVirtualIPRules(sw);
 		this.installARPRules(sw);
-		this.installTableFowardRules(sw);
+		this.installTableForwardRules(sw);
 	}
 	
 	/**
@@ -214,7 +230,86 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 		/*       ignore all other packets                                    */
 		
 		/*********************************************************************/
+		if(ethPkt.getEtherType() == Ethernet.TYPE_ARP) {
+		    // Send ARP Reply
+		    ARP arpPkt = (ARP) ethPkt.getPayload();
+		    int targetIp = ByteBuffer.wrap(arpPkt.getTargetProtocolAddress()).getInt();
+		    int senderIp = ByteBuffer.wrap(arpPkt.getSenderProtocolAddress()).getInt();
+		    byte[] replyMAC = this.instances.get(targetIp).getVirtualMAC();
 
+		    // Construct packet
+		    Ethernet ether = new Ethernet();
+		    ARP arp = new ARP();
+		    ether.setPayload(arp);
+		    
+		    // Set relevant parts of Ethernet
+		    ether.setEtherType(Ethernet.TYPE_ARP);
+		    ether.setSourceMACAddress(replyMAC);
+		    ether.setDestinationMACAddress(ethPkt.getSourceMACAddress());
+		    
+		    // Set relevant parts of ARP
+		    arp.setHardwareType(ARP.HW_TYPE_ETHERNET);
+		    arp.setProtocolType(ARP.PROTO_TYPE_IP);
+		    arp.setHardwareAddressLength((byte) Ethernet.DATALAYER_ADDRESS_LENGTH);
+		    arp.setProtocolAddressLength((byte) 4);
+		    arp.setOpCode(ARP.OP_REPLY);
+		    arp.setSenderHardwareAddress(replyMAC);
+		    arp.setSenderProtocolAddress(targetIp);
+		    arp.setTargetHardwareAddress(ethPkt.getSourceMACAddress());
+		    arp.setTargetProtocolAddress(senderIp);
+		    
+		    SwitchCommands.sendPacket(sw, (short) pktIn.getInPort(), ether);
+		    log.info(String.format("Sending ARP reply. DST IP%d DST MAC%d", targetIp, replyMAC[0]));
+
+		} else if(ethPkt.getEtherType() == Ethernet.TYPE_IPv4) {
+		    // Only sending TCP pkts to controller so can bank on it being TCP
+		    IPv4 ipPkt = (IPv4) ethPkt.getPayload();
+		    TCP tcpPkt = (TCP) ipPkt.getPayload();
+		    
+		    if(tcpPkt.getFlags() != TCP_FLAG_SYN)
+			return Command.CONTINUE;
+
+		    LoadBalancerInstance loadBalancer = this.instances.get(ipPkt.getDestinationAddress());
+		    int newDstIP = loadBalancer.getNextHostIP();
+		    byte[] newDstMAC = this.getHostMACAddress(newDstIP);
+
+		    // Install the new rules, first install client->server rule
+		     OFMatch matchRule = new OFMatch();
+		     matchRule.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+		     matchRule.setNetworkSource(ipPkt.getSourceAddress());
+		     matchRule.setNetworkDestination(ipPkt.getDestinationAddress());
+		     matchRule.setNetworkProtocol(OFMatch.IP_PROTO_TCP);
+		     matchRule.setTransportSource(tcpPkt.getSourcePort());
+		     matchRule.setTransportDestination(tcpPkt.getDestinationPort());
+
+		     OFAction changeMACAction = new OFActionSetField(OFOXMFieldType.ETH_DST, newDstMAC);
+		     OFAction changeIPAction = new OFActionSetField(OFOXMFieldType.IPV4_DST, newDstIP);
+		     OFInstruction actions = 
+			 new OFInstructionApplyActions(Arrays.asList(changeMACAction, changeIPAction));
+		     OFInstruction nextTableAction = 
+			 new OFInstructionGotoTable(L3Routing.table);
+		     SwitchCommands.installRule(sw, this.table,	PRIORITY_CONNECTION_SPECIFIC, matchRule,
+						Arrays.asList(actions, nextTableAction), (short) 0, (short) 20);
+
+		     // Now for the server->client
+		     OFMatch serverMatchRule = new OFMatch();
+		     serverMatchRule.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+		     serverMatchRule.setNetworkSource(newDstIP);
+		     serverMatchRule.setNetworkDestination(ipPkt.getSourceAddress());
+		     serverMatchRule.setNetworkProtocol(OFMatch.IP_PROTO_TCP);
+		     serverMatchRule.setTransportSource(tcpPkt.getDestinationPort());
+		     serverMatchRule.setTransportDestination(tcpPkt.getSourcePort());
+
+		     OFAction serverChangeMACAction = 
+			 new OFActionSetField(OFOXMFieldType.ETH_SRC, ethPkt.getDestinationMACAddress());
+		     OFAction serverChangeIPAction = 
+			 new OFActionSetField(OFOXMFieldType.IPV4_SRC, ipPkt.getDestinationAddress());
+		     OFInstruction serverActions = 
+			 new OFInstructionApplyActions(Arrays.asList(serverChangeMACAction, serverChangeIPAction));
+		     SwitchCommands.installRule(sw, this.table,	PRIORITY_CONNECTION_SPECIFIC, serverMatchRule,
+						Arrays.asList(serverActions, nextTableAction), (short) 0, (short) 20);
+		}
+		
 		
 		// We don't care about other packets
 		return Command.CONTINUE;

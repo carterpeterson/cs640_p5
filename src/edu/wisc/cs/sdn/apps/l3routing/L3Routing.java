@@ -205,6 +205,9 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 
     private void addRulesForHost(Host host) {
 	// Switch ID, outbound port to get packets back to host
+	if(host.getSwitch() == null)
+	    return;
+
 	Map<Long, Integer> switchRoutes = getBestRoutesToHost(host.getSwitch());
 	Set<Long> switchIds = switchRoutes.keySet();
 	
